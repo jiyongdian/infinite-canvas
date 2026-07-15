@@ -1,5 +1,6 @@
 import { CanvasNodeType } from "@/types/canvas";
 import type { CanvasNodeMetadata } from "@/types/canvas";
+import { getNodeSpec as getRegistryNodeSpec } from "@/lib/canvas/node-registry";
 
 type CanvasNodeSpec = {
     width: number;
@@ -44,6 +45,9 @@ export const NODE_SPECS = {
     },
 } satisfies Record<CanvasNodeType, CanvasNodeSpec>;
 
-export function getNodeSpec(type: CanvasNodeType) {
-    return NODE_SPECS[type];
+// 内置类型返回内置 spec;插件类型从注册表解析
+export function getNodeSpec(type: string) {
+    if ((Object.values(CanvasNodeType) as string[]).includes(type)) return NODE_SPECS[type as CanvasNodeType];
+    const spec = getRegistryNodeSpec(type);
+    return { width: spec.width, height: spec.height, title: spec.title, metadata: spec.metadata };
 }

@@ -134,9 +134,9 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
     const defaultModel = mode === "image" ? globalConfig.imageModel : mode === "video" ? globalConfig.videoModel : mode === "audio" ? globalConfig.audioModel : globalConfig.textModel;
     const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     const currentModel = node.metadata?.model;
-    const model = currentModel && modelMatchesCapability(currentModel, mode)
+    const model = currentModel && modelMatchesCapability(globalConfig, currentModel, mode)
         ? currentModel
-        : defaultModel && modelMatchesCapability(defaultModel, mode)
+        : defaultModel && modelMatchesCapability(globalConfig, defaultModel, mode)
             ? defaultModel
             : fallbackModel;
     return {

@@ -927,8 +927,8 @@ function siteToolSummary(name: string, result: unknown) {
     const data = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
     if (name === "canvas_list_projects") return `共 ${numberField(data, "total")} 个画布`;
     if (name === "prompts_search") return `找到 ${numberField(data, "total")} 条提示词`;
-    if (name === "assets_list") return `共 ${numberField(data, "total")} 个素材`;
-    if (name === "assets_add") return "已加入我的素材";
+    if (name === "assets_list") return `共 ${numberField(data, "total")} 个资产`;
+    if (name === "assets_add") return "已加入我的资产";
     if (name === "workbench_image_generate" || name === "workbench_video_generate") return typeof data.note === "string" ? data.note : "已在工作台执行";
     if (name === "workbench_image_get_config" || name === "workbench_video_get_config") return "已读取工作台配置";
     return "已完成";
