@@ -1,21 +1,20 @@
 import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { App, Empty, Input, Popconfirm, Select, Tag } from "antd";
-import { Check, ChevronRight, Download, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
+import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
+import { useQuery } from "@tanstack/react-query";
+import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
 import { motion } from "motion/react";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
+import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
+import { fetchSourcePrompts, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind } from "@/stores/use-asset-store";
-import {
-    CANVAS_SIDE_PANEL_MAX_WIDTH,
-    CANVAS_SIDE_PANEL_MIN_WIDTH,
-    CANVAS_SIDE_PANEL_MOTION_MS,
-    useCanvasSidePanelStore,
-} from "@/stores/use-canvas-side-panel-store";
+import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
+import { CANVAS_SIDE_PANEL_MAX_WIDTH, CANVAS_SIDE_PANEL_MIN_WIDTH, CANVAS_SIDE_PANEL_MOTION_MS, useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
@@ -24,7 +23,7 @@ import type { InsertAssetPayload } from "./asset-picker-modal";
 const PANEL_MOTION_SECONDS = CANVAS_SIDE_PANEL_MOTION_MS / 1000;
 const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
 
-type PanelTab = "canvas" | "assets";
+type PanelTab = "canvas" | "assets" | "prompts";
 
 type Props = {
     nodes: CanvasNodeData[];
@@ -100,8 +99,17 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onInsertA
                 <div className="flex items-center gap-5 px-4 pt-3.5">
                     <TabButton label="画布" active={tab === "canvas"} theme={theme} onClick={() => setTab("canvas")} />
                     <TabButton label="资产" active={tab === "assets"} theme={theme} onClick={() => setTab("assets")} />
+                    <TabButton label="提示词库" active={tab === "prompts"} theme={theme} onClick={() => setTab("prompts")} />
                 </div>
-                <div className="mt-2 min-h-0 flex-1 overflow-hidden">{tab === "canvas" ? <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} theme={theme} /> : <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />}</div>
+                <div className="mt-2 min-h-0 flex-1 overflow-hidden">
+                    {tab === "canvas" ? (
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} theme={theme} />
+                    ) : tab === "assets" ? (
+                        <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />
+                    ) : (
+                        <CanvasPromptsTab onInsert={onInsertAsset} theme={theme} />
+                    )}
+                </div>
                 <button type="button" className="absolute inset-y-0 right-0 z-40 w-4 translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label="调整左侧面板宽度" />
             </motion.aside>
         </motion.div>
@@ -363,7 +371,11 @@ function CanvasAssetsTab({ onInsert, theme }: { onInsert: (payload: InsertAssetP
                             const isCollapsed = collapsed[group.kind];
                             return (
                                 <div key={group.kind}>
-                                    <button type="button" onClick={() => setCollapsed((prev) => ({ ...prev, [group.kind]: !prev[group.kind] }))} className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100">
+                                    <button
+                                        type="button"
+                                        onClick={() => setCollapsed((prev) => ({ ...prev, [group.kind]: !prev[group.kind] }))}
+                                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100"
+                                    >
                                         <ChevronRight className={cn("size-3.5 transition-transform", !isCollapsed && "rotate-90")} />
                                         <group.icon className="size-3.5" />
                                         <span>{group.label}</span>
@@ -422,4 +434,153 @@ function AssetCover({ asset }: { asset: Asset }) {
         return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     }
     return <img src={asset.coverUrl || asset.data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+}
+
+// ---------------------------------------------------------------------------
+// 提示词库 Tab —— 按来源折叠分组,展开时按需加载,点击复制 / 插入文本节点
+// ---------------------------------------------------------------------------
+
+function CanvasPromptsTab({ onInsert, theme }: { onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
+    const { message } = App.useApp();
+    const sources = usePromptSourceStore((state) => state.sources);
+    const enabledSources = useMemo(() => sources.filter((source) => source.enabled), [sources]);
+    const [keyword, setKeyword] = useState("");
+    const [expanded, setExpanded] = useState<Record<string, boolean>>(() => (enabledSources[0] ? { [enabledSources[0].id]: true } : {}));
+    const [detail, setDetail] = useState<Prompt | null>(null);
+
+    const copyPrompt = async (prompt: string) => {
+        try {
+            await navigator.clipboard.writeText(prompt);
+            message.success("已复制提示词");
+        } catch {
+            message.error("复制失败");
+        }
+    };
+
+    return (
+        <div className="flex h-full flex-col">
+            <div className="px-3 pb-2.5 pt-1">
+                <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder="搜索提示词" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+                {enabledSources.length ? (
+                    <div className="space-y-1">
+                        {enabledSources.map((source) => (
+                            <PromptSourceGroup
+                                key={source.id}
+                                sourceId={source.id}
+                                sourceName={source.name}
+                                keyword={keyword}
+                                open={!!expanded[source.id]}
+                                theme={theme}
+                                onToggle={() => setExpanded((prev) => ({ ...prev, [source.id]: !prev[source.id] }))}
+                                onInsert={onInsert}
+                                onView={setDetail}
+                            />
+                        ))}
+                    </div>
+                ) : (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无提示词来源" className="pt-16" />
+                )}
+            </div>
+            <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />
+        </div>
+    );
+}
+
+function PromptSourceGroup({
+    sourceId,
+    sourceName,
+    keyword,
+    open,
+    theme,
+    onToggle,
+    onInsert,
+    onView,
+}: {
+    sourceId: string;
+    sourceName: string;
+    keyword: string;
+    open: boolean;
+    theme: CanvasTheme;
+    onToggle: () => void;
+    onInsert: (payload: InsertAssetPayload) => void;
+    onView: (prompt: Prompt) => void;
+}) {
+    // 展开过一次即缓存,避免收起后重复请求;搜索命中时也需要拿到数据来计数。
+    const query = useQuery({ queryKey: ["side-panel-prompts", sourceId], queryFn: () => fetchSourcePrompts(sourceId), enabled: open, staleTime: 1000 * 60 * 60 });
+
+    const filtered = useMemo(() => {
+        const items = query.data || [];
+        const q = keyword.trim().toLowerCase();
+        if (!q) return items;
+        return items.filter((item) => [item.title, item.prompt, ...item.tags].join(" ").toLowerCase().includes(q));
+    }, [query.data, keyword]);
+
+    const insertPrompt = (item: Prompt) => onInsert({ kind: "text", content: item.prompt, title: item.title });
+
+    return (
+        <div>
+            <button type="button" onClick={onToggle} className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100">
+                <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
+                <BookOpen className="size-3.5" />
+                <span className="min-w-0 flex-1 truncate">{sourceName}</span>
+                {open && query.isSuccess ? <span className="opacity-50">{filtered.length}</span> : null}
+            </button>
+            {open ? (
+                <div className="px-1 pb-2 pt-1">
+                    {query.isLoading ? (
+                        <div className="flex justify-center py-6">
+                            <Spin size="small" />
+                        </div>
+                    ) : query.isError ? (
+                        <button type="button" onClick={() => void query.refetch()} className="block w-full py-4 text-center text-xs text-red-500 opacity-80 transition hover:opacity-100">
+                            加载失败,点击重试
+                        </button>
+                    ) : filtered.length ? (
+                        <div className="space-y-1.5">
+                            {filtered.map((item) => (
+                                <PromptRow key={item.id} item={item} theme={theme} onInsert={() => insertPrompt(item)} onView={() => onView(item)} />
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="py-4 text-center text-xs opacity-40">{keyword.trim() ? "无匹配提示词" : "该来源暂无提示词"}</div>
+                    )}
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
+function PromptRow({ item, theme, onInsert, onView }: { item: Prompt; theme: CanvasTheme; onInsert: () => void; onView: () => void }) {
+    return (
+        <div className="group relative flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-black/5 dark:hover:bg-white/5">
+            {item.coverUrl ? (
+                <img src={item.coverUrl} alt="" className="size-10 shrink-0 rounded-md object-cover" loading="lazy" />
+            ) : (
+                <span className="grid size-10 shrink-0 place-items-center rounded-md" style={{ background: theme.node.panel }}>
+                    <FileText className="size-4 opacity-50" />
+                </span>
+            )}
+            <button type="button" onClick={onView} className="min-w-0 flex-1 text-left">
+                <div className="truncate text-sm font-medium leading-snug">{item.title}</div>
+                <div className="mt-0.5 truncate text-xs leading-snug opacity-50">{item.prompt}</div>
+            </button>
+            <div className="flex shrink-0 flex-col items-center gap-0.5">
+                <button type="button" onClick={onView} className="grid size-6 place-items-center rounded-md opacity-60 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10" aria-label="查看详情" title="查看详情">
+                    <Eye className="size-3.5" />
+                </button>
+                <button
+                    type="button"
+                    onClick={onInsert}
+                    className="grid size-6 place-items-center rounded-md opacity-60 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10"
+                    style={{ color: theme.toolbar.activeText }}
+                    aria-label="插入画布"
+                    title="插入画布"
+                >
+                    <Plus className="size-3.5" />
+                </button>
+            </div>
+        </div>
+    );
 }
