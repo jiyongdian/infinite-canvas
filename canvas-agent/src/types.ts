@@ -5,4 +5,4 @@ export type CanvasNode = { id: string; type: CanvasNodeType; title?: string; pos
 export type CanvasConnection = { id: string; fromNodeId: string; toNodeId: string };
 export type CanvasSnapshot = { projectId?: string; title?: string; nodes?: CanvasNode[]; connections?: CanvasConnection[]; selectedNodeIds?: string[]; viewport?: Viewport; clientId?: string };
 export type AgentEmit = (type: string, payload: unknown) => void;
-export type AgentAttachment = { name?: string; type?: string; dataUrl?: string };
+export type AgentAttachment = { id?: string; name?: string; type?: string; size?: number; width?: number; height?: number; dataUrl?: string };

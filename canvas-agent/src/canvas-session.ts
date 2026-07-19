@@ -3,9 +3,10 @@ import type { ServerResponse } from "node:http";
 
 import { type ToolName } from "./schemas.js";
 import { compactCanvasState, compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
-import type { CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
+import type { AgentAttachment, CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
 
 type PendingRequest = { clientId: string; resolve: (value: unknown) => void; reject: (error: Error) => void };
+type TurnAttachment = { clientId: string; id: string; name: string; type: string; size: number; width: number; height: number; dataUrl: string };
 export type CodexState = { busy: boolean; threadId: string; turnId: string };
 
 const SITE_TOOLS = new Set<ToolName>([
@@ -26,6 +27,7 @@ export class CanvasSession {
     private clientFocusOrder = new Map<string, number>();
     private pending = new Map<string, PendingRequest>();
     private canvasStates = new Map<string, CanvasSnapshot>();
+    private turnAttachments = new Map<string, TurnAttachment>();
     private activeClientId = "";
     private boundClientId = "";
     private focusSequence = 0;
@@ -103,6 +105,39 @@ export class CanvasSession {
         if (this.boundClientId === clientId) this.boundClientId = "";
     }
 
+    setTurnAttachments(clientId: string, attachments: AgentAttachment[]) {
+        this.turnAttachments.clear();
+        return attachments.flatMap((item, index) => {
+            if (!item.dataUrl?.startsWith("data:image/")) return [];
+            const id = item.id?.trim() || `attachment-${crypto.randomUUID()}`;
+            const attachment: TurnAttachment = {
+                clientId,
+                id,
+                name: item.name?.trim() || `图片 ${index + 1}`,
+                type: item.type?.startsWith("image/") ? item.type : item.dataUrl.match(/^data:([^;]+)/)?.[1] || "image/png",
+                size: positiveNumber(item.size, 0),
+                width: positiveNumber(item.width, 1024),
+                height: positiveNumber(item.height, 1024),
+                dataUrl: item.dataUrl,
+            };
+            this.turnAttachments.set(id, attachment);
+            return [{ id, name: attachment.name, type: attachment.type, size: attachment.size, width: attachment.width, height: attachment.height }];
+        });
+    }
+
+    clearTurnAttachments(clientId?: string) {
+        this.turnAttachments.forEach((item, id) => {
+            if (!clientId || item.clientId === clientId) this.turnAttachments.delete(id);
+        });
+    }
+
+    getTurnAttachment(clientId: string, attachmentId: string) {
+        const attachment = this.turnAttachments.get(attachmentId);
+        if (!attachment) throw new Error(`找不到本轮图片附件：${attachmentId}`);
+        if (attachment.clientId !== clientId) throw new Error("图片附件不属于当前 turn 的发起标签页");
+        return attachment;
+    }
+
     resolveResult(clientId: string, body: { requestId?: string; error?: string; result?: unknown }) {
         const item = body.requestId ? this.pending.get(body.requestId) : null;
         if (!item || !body.requestId || item.clientId !== clientId) return false;
@@ -134,6 +169,7 @@ export class CanvasSession {
             const ids = new Set(this.canvasState?.selectedNodeIds || []);
             return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };
         }
+        if (tool === "canvas_create_attachment_nodes") return await this.createAttachmentNodes(input as { attachmentIds: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" });
         if (tool === "canvas_create_node") {
             const data = input as { nodeType: CanvasNodeType; title?: string; x?: number; y?: number; width?: number; height?: number; metadata?: Record<string, unknown> };
             input = { ops: [{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? nextCanvasX(this.canvasState), y: data.y ?? 0 }, width: data.width, height: data.height, metadata: data.metadata }] };
@@ -226,6 +262,32 @@ export class CanvasSession {
         if (tool !== "canvas_apply_ops") throw new Error(`未知工具：${tool}`);
         if (!this.clients.size) throw new Error("当前没有已连接画布");
         return await this.requestCanvasTool(tool, input);
+    }
+
+    private async createAttachmentNodes(input: { attachmentIds: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" }) {
+        const clientId = this.targetClientId;
+        if (!this.clients.has(clientId)) throw new Error("当前没有已连接画布");
+        const attachments = input.attachmentIds.map((id) => this.getTurnAttachment(clientId, id));
+        const x = Number(input.x ?? nextCanvasX(this.canvasState));
+        const y = Number(input.y ?? 0);
+        const gap = Number(input.gap ?? 40);
+        const direction = input.direction || "row";
+        let offset = 0;
+        const nodes = attachments.map((attachment) => {
+            const size = fitAttachmentNodeSize(attachment.width, attachment.height);
+            const node = {
+                id: `image-${crypto.randomUUID()}`,
+                attachmentId: attachment.id,
+                title: attachment.name,
+                position: { x: direction === "row" ? x + offset : x, y: direction === "column" ? y + offset : y },
+                width: size.width,
+                height: size.height,
+            };
+            offset += (direction === "row" ? size.width : size.height) + gap;
+            return node;
+        });
+        await this.requestCanvasTool("canvas_create_attachment_nodes", { nodes });
+        return { nodes: nodes.map(({ id, attachmentId, title }) => ({ id, attachmentId, title })) };
     }
 
     private async requestCanvasTool(name: ToolName, input: Record<string, unknown>) {
@@ -325,4 +387,14 @@ function findNode(state: CanvasSnapshot | null, id: string): CanvasNode | undefi
 
 function cleanRecord(value: Record<string, unknown>) {
     return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== ""));
+}
+
+function positiveNumber(value: unknown, fallback: number) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function fitAttachmentNodeSize(width: number, height: number) {
+    const scale = Math.min(1, 640 / width, 640 / height);
+    return { width: width * scale, height: height * scale };
 }

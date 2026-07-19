@@ -50,6 +50,13 @@ export function startHttpServer() {
         const ok = session.resolveResult(String(req.query.clientId || ""), req.body);
         res.status(ok ? 200 : 409).json({ ok });
     });
+    app.get("/agent/attachments/:attachmentId", route(async (req, res) => {
+        const attachment = session.getTurnAttachment(String(req.query.clientId || ""), routeParam(req.params.attachmentId));
+        const data = attachment.dataUrl.split(",", 2)[1];
+        if (!data) throw new Error("图片附件内容无效");
+        res.setHeader("Cache-Control", "no-store");
+        res.type(attachment.type).send(Buffer.from(data, "base64"));
+    }));
     app.post("/api/tools", route(async (req, res) => res.json({ ok: true, result: await session.callTool(req.body?.name, req.body?.input || {}) })));
     app.get("/agent/codex/workspace", (_req, res) => {
         const workspace = ensureSiteWorkspace(config);
@@ -113,6 +120,7 @@ export function startHttpServer() {
                 await verifyCodexThreadWorkspace(emit, threadId, workspace.workspacePath);
                 setActiveThread(threadId);
             }
+            const attachmentRefs = session.setTurnAttachments(clientId, attachments);
             const chatMessage = {
                 sourceClientId: clientId,
                 message: { id: String(req.body?.messageId || Date.now()), role: "user", text: String(req.body?.messageText || prompt || `发送了 ${attachments.length} 张图片`) },
@@ -122,7 +130,7 @@ export function startHttpServer() {
                 const data = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : { value: payload };
                 session.emitThread(type, threadId, data);
             };
-            void runCodexTurn(withAgentPrompt(prompt), turnEmit, attachments, {
+            void runCodexTurn(withAgentPrompt(withAttachmentContext(prompt, attachmentRefs)), turnEmit, attachments, {
                 threadId,
                 cwd: workspace.workspacePath,
                 appEmit: emit,
@@ -143,6 +151,7 @@ export function startHttpServer() {
                     session.setCodexState({ busy: true, threadId, turnId });
                 },
                 onFinish: () => {
+                    session.clearTurnAttachments(clientId);
                     if (clientId) session.releaseClient(clientId);
                     session.setCodexState({ busy: false, threadId, turnId });
                 },
@@ -205,4 +214,10 @@ function setCors(req: Request, res: Response, url: URL, config: CanvasAgentConfi
 function validToken(req: Request, url: URL, token: string) {
     const header = req.headers["x-canvas-agent-token"];
     return url.searchParams.get("token") === token || header === token || (Array.isArray(header) && header.includes(token));
+}
+
+function withAttachmentContext(prompt: string, attachments: Array<{ id: string; name: string }>) {
+    if (!attachments.length) return prompt;
+    const list = attachments.map((item, index) => `${index + 1}. attachmentId=${item.id}, name=${JSON.stringify(item.name)}`).join("\n");
+    return `${prompt}\n\n本轮可用图片附件（顺序与图片输入一致）：\n${list}\n需要把附件放入画布或作为生成参考图时，先调用 canvas_create_attachment_nodes，再使用返回的画布节点 ID 创建生成流程。`;
 }

@@ -5,7 +5,11 @@ import copyToClipboard from "copy-to-clipboard";
 import { Copy, FolderOpen, History, KeyRound, Link2, LoaderCircle, PlugZap, Plus, RefreshCw, Square, Terminal, Trash2 } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { imageMetadata } from "@/lib/canvas/canvas-node-factory";
+import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
+import { readImageMeta } from "@/lib/image-utils";
 import { randomId } from "@/lib/utils";
+import { uploadImage } from "@/services/image-storage";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
 import { useShallow } from "zustand/react/shallow";
@@ -276,7 +280,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
                     messageId,
                     clientId: clientIdRef.current,
                     threadId: useAgentStore.getState().activeThreadId || undefined,
-                    attachments: files.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })),
+                    attachments: files.map(({ id, name, type, size, width, height, dataUrl }) => ({ id, name, type, size, width, height, dataUrl })),
                 }),
             });
             if (data.threadId) setAgentState({ activeThreadId: data.threadId });
@@ -316,9 +320,10 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
             const next = await Promise.all(
                 images.slice(0, Math.max(0, MAX_ATTACHMENTS - prev.length)).map(async (file) => {
                     const dataUrl = await readDataUrl(file);
+                    const meta = await readImageMeta(dataUrl);
                     const url = URL.createObjectURL(file);
                     attachmentUrlsRef.current.add(url);
-                    return { id: createId(), name: file.name, type: file.type, size: file.size, url, dataUrl };
+                    return { id: createId(), name: file.name, type: file.type, size: file.size, width: meta.width, height: meta.height, url, dataUrl };
                 }),
             );
             const merged = [...prev, ...next];
@@ -346,7 +351,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
     };
 
     const handleToolCall = async (endpoint: string, token: string, payload: AgentPendingToolCall) => {
-        if (confirmToolsRef.current && payload.name === "canvas_apply_ops") {
+        if (confirmToolsRef.current && isCanvasWriteTool(payload.name)) {
             if (pendingToolRef.current) {
                 await postToolResult(endpoint, token, clientIdRef.current, { requestId: payload.requestId, error: "仍有待确认的画布工具调用" });
                 return;
@@ -378,6 +383,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
             const input: { ops?: CanvasAgentOp[]; path?: string } = payload.input || {};
             addEventLog(toolName(payload.name), payload, payload);
             let result: unknown;
+            let appliedOps = input.ops || [];
             if (payload.name === "site_navigate") {
                 const path = input.path || "/";
                 navigate(path);
@@ -385,8 +391,14 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
             } else if (payload.name === "canvas_apply_ops") {
                 const context = canvasContextRef.current;
                 if (!context) throw new Error("当前不在画布页，请先用 site_navigate 打开画布");
-                result = context.applyOps(input.ops || []);
+                result = context.applyOps(appliedOps);
                 void postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
+            } else if (payload.name === "canvas_create_attachment_nodes") {
+                const context = canvasContextRef.current;
+                if (!context) throw new Error("当前不在画布页，请先用 site_navigate 打开画布");
+                appliedOps = await attachmentNodeOps(endpoint, token, clientIdRef.current, payload.input?.nodes);
+                result = context.applyOps(appliedOps);
+                await postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
             } else {
                 const snapshot = canvasContextRef.current?.snapshot;
                 if (!snapshot) throw new Error("当前不在画布页，请先用 site_navigate 打开画布");
@@ -397,7 +409,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
             addMessage({
                 role: "tool",
                 title: `${toolName(payload.name)}完成`,
-                text: payload.name === "canvas_apply_ops" ? summarizeCanvasAgentOps(input.ops || []) || "画布操作" : payload.name === "site_navigate" ? `已跳转到 ${input.path || "/"}` : "已完成",
+                text: appliedOps.length ? summarizeCanvasAgentOps(appliedOps) || "画布操作" : payload.name === "site_navigate" ? `已跳转到 ${input.path || "/"}` : "已完成",
                 detail: { requestId: payload.requestId, name: payload.name, input, result },
             });
         } catch (error) {
@@ -1113,6 +1125,7 @@ function toolName(name: string) {
     if (name === "canvas_get_selection") return "读取选区";
     if (name === "canvas_export_snapshot") return "导出快照";
     if (name === "canvas_create_node") return "创建节点";
+    if (name === "canvas_create_attachment_nodes") return "添加附件图片";
     if (name === "canvas_create_text_node") return "创建文本";
     if (name === "canvas_create_text_nodes") return "批量创建文本";
     if (name === "canvas_create_config_node") return "创建生成配置";
@@ -1220,9 +1233,7 @@ function mergeAgentText(prev: string, next: string) {
 }
 
 function promptWithAttachments(text: string, attachments: AgentAttachment[]) {
-    if (!attachments.length) return text;
-    const names = attachments.map((item) => item.name).join("、");
-    return [text, `用户上传了 ${attachments.length} 张图片附件：${names}。`].filter(Boolean).join("\n\n");
+    return text || (attachments.length ? "请处理上传的图片附件。" : "");
 }
 
 function attachmentPayloadBytes(attachments: AgentAttachment[]) {
@@ -1231,6 +1242,41 @@ function attachmentPayloadBytes(attachments: AgentAttachment[]) {
 
 function formatBytes(bytes: number) {
     return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)}MB` : `${Math.ceil(bytes / 1024)}KB`;
+}
+
+function isCanvasWriteTool(name: string) {
+    return name === "canvas_apply_ops" || name === "canvas_create_attachment_nodes";
+}
+
+async function attachmentNodeOps(endpoint: string, token: string, clientId: string, value: unknown): Promise<CanvasAgentOp[]> {
+    const nodes = Array.isArray(value) ? value : [];
+    if (!nodes.length) throw new Error("没有可添加的图片附件");
+    return await Promise.all(
+        nodes.map(async (value) => {
+            const item = value as { id?: unknown; attachmentId?: unknown; title?: unknown; position?: unknown };
+            const id = String(item.id || "");
+            const attachmentId = String(item.attachmentId || "");
+            if (!id || !attachmentId) throw new Error("图片附件节点参数无效");
+            const res = await fetch(`${endpoint}/agent/attachments/${encodeURIComponent(attachmentId)}?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
+            if (!res.ok) {
+                const body = (await res.json().catch(() => null)) as { error?: string } | null;
+                throw new Error(body?.error || "读取图片附件失败");
+            }
+            const image = await uploadImage(await res.blob());
+            const size = fitNodeSize(image.width, image.height);
+            const position = item.position && typeof item.position === "object" ? (item.position as { x?: unknown; y?: unknown }) : {};
+            return {
+                type: "add_node" as const,
+                id,
+                nodeType: "image" as const,
+                title: String(item.title || "参考图"),
+                position: { x: Number(position.x) || 0, y: Number(position.y) || 0 },
+                width: size.width,
+                height: size.height,
+                metadata: imageMetadata(image),
+            };
+        }),
+    );
 }
 
 async function fetchAgentJson<T>(endpoint: string, token: string, path: string, init?: RequestInit) {

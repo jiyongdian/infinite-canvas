@@ -43,6 +43,53 @@ test("画布写操作只发送给当前激活网页", async (t) => {
     assert.deepEqual(await result, { ok: true });
 });
 
+test("当前 turn 的图片附件可在发起标签页画布创建图片节点", async (t) => {
+    const session = new CanvasSession();
+    const first = connect(session, "first");
+    t.after(() => first.close());
+    const dataUrl = "data:image/png;base64,aW1hZ2U=";
+    session.setTurnAttachments("first", [{ id: "attachment-1", name: "商品.png", type: "image/png", size: 5, width: 1200, height: 600, dataUrl }]);
+    session.bindClient("first");
+
+    const result = session.callTool("canvas_create_attachment_nodes", { attachmentIds: ["attachment-1"], x: 100, y: 200 });
+    const call = first.event("tool_call");
+    const input = field(call, "input") as Record<string, unknown>;
+    const nodes = input.nodes as Array<Record<string, unknown>>;
+    assert.equal(field(call, "name"), "canvas_create_attachment_nodes");
+    assert.equal(nodes.length, 1);
+    assert.equal(nodes[0].attachmentId, "attachment-1");
+    assert.equal(nodes[0].title, "商品.png");
+    assert.deepEqual(nodes[0].position, { x: 100, y: 200 });
+    assert.equal(nodes[0].width, 640);
+    assert.equal(nodes[0].height, 320);
+    assert.equal("dataUrl" in nodes[0], false);
+    assert.equal(session.getTurnAttachment("first", "attachment-1").dataUrl, dataUrl);
+
+    session.resolveResult("first", { requestId: String(field(call, "requestId")), result: { ok: true } });
+    const created = (await result) as { nodes: Array<{ id: string; attachmentId: string; title: string }> };
+    assert.equal(created.nodes[0].id, nodes[0].id);
+    assert.equal(created.nodes[0].attachmentId, "attachment-1");
+    session.clearTurnAttachments("first");
+    assert.throws(() => session.getTurnAttachment("first", "attachment-1"), /找不到/);
+});
+
+test("图片附件只允许发起 turn 的标签页读取和落入画布", async (t) => {
+    const session = new CanvasSession();
+    const first = connect(session, "first");
+    const second = connect(session, "second");
+    t.after(() => {
+        first.close();
+        second.close();
+    });
+    session.setTurnAttachments("first", [{ id: "attachment-1", name: "商品.png", type: "image/png", dataUrl: "data:image/png;base64,aW1hZ2U=" }]);
+    session.bindClient("second");
+
+    await assert.rejects(session.callTool("canvas_create_attachment_nodes", { attachmentIds: ["attachment-1"] }), /发起标签页/);
+    assert.throws(() => session.getTurnAttachment("second", "attachment-1"), /发起标签页/);
+    assert.equal(first.event("tool_call"), undefined);
+    assert.equal(second.event("tool_call"), undefined);
+});
+
 test("tool result is accepted only from the request client", async (t) => {
     const session = new CanvasSession();
     const first = connect(session, "first");

@@ -482,6 +482,7 @@ function toolName(name: string) {
     if (name === "canvas_get_state") return "读取画布";
     if (name === "canvas_get_selection") return "读取选区";
     if (name === "canvas_export_snapshot") return "导出快照";
+    if (name === "canvas_create_attachment_nodes") return "添加附件图片";
     if (name === "canvas_create_text_node") return "创建文本";
     if (name === "canvas_create_image_prompt_flow") return "创建生图流程";
     if (name === "canvas_create_generation_flow") return "创建生成流程";

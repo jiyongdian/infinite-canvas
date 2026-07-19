@@ -3,7 +3,7 @@ import { create } from "zustand";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 
 export type AgentChatRole = "user" | "assistant" | "system" | "tool" | "error";
-export type AgentAttachment = { id: string; name: string; type: string; size: number; url: string; dataUrl: string };
+export type AgentAttachment = { id: string; name: string; type: string; size: number; width: number; height: number; url: string; dataUrl: string };
 export type AgentChatItem = { id: string; role: AgentChatRole; title?: string; text: string; meta?: string; detail?: unknown; attachments?: AgentAttachment[]; streamId?: string };
 export type AgentEventLog = { id: string; time: string; title: string; text: string; raw?: unknown };
 export type AgentPendingToolCall = { requestId: string; name: string; input?: { ops?: CanvasAgentOp[]; path?: string } & Record<string, unknown> };
